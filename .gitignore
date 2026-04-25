@@ -1,0 +1,4 @@
+wal.log.ndjson
+.vscode
+.venv
+__pycache__

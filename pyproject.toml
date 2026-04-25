@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "vectkv-python"
+version = "0.1.0"
+description = ""
+authors = ["dakohhh <wiizzydreadmill@gmail.com>"]
+readme = "README.md"
+package-mode = true
+
+[tool.poetry.dependencies]
+python = "^3.12"
+hnswlib = "^0.8.0"
+pydantic = "^2.13.2"
+fastapi = "^0.136.1"
+aiofiles = "^25.1.0"
+
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.19.1"
+types-aiofiles = "^25.1.0.20260409"
+
+[tool.mypy]
+python_version = "3.11.8"
+ignore_missing_imports = true
+strict = true
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+vectkv = "cli.main:app"
