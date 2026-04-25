@@ -330,7 +330,6 @@ async def main() -> None:
         await db.set_ef_search("animals", 50)
 
         # Add some vectors
-
         await db.add_vector("animals", "dog", [1.0, 2.0, 3.0])
 
         await db.add_vector("animals", "cat", [1.1, 2.2, 3.3])
