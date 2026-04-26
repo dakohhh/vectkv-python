@@ -1,71 +1,17 @@
 import os
 import json
 import asyncio
-import hnswlib
 import aiofiles
 import numpy as np
 from pathlib import Path
 from types import TracebackType
-from  dataclasses import dataclass, field
 from .types import JSON, Metric, VectKvId, OperationType
-from typing import Dict, List, Literal, cast, Optional, Self
+from typing import Dict, List, Optional, Self
+from .schema import Page, VectorStore, VectKvSearchResult
 from .wal import CreatePageWALOperation, DeletePageWALOperation, AddVectorPageWALOperation
 from .exceptions import VectKvException, PageVectorDimException, VectKvIdAlreadyExistException
 
-@dataclass
-class VectorStore:
-    # vector: List[float]
-    metadata: Optional[JSON] = None
-
-_METRIC_TO_SPACE: Dict[str, str] = {"cosine": "cosine", "euclidean": "l2", "ip": "ip"}
-
-
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
-
-@dataclass
-class Page:
-    vectors: Dict[VectKvId, VectorStore]
-
-    vector_dim: int
-
-    hnsw_id_to_vectkv_id_map: Dict[int, VectKvId]
-
-    vectkv_id_to_hnsw_id_map: Dict[VectKvId, int]
-
-    HNSW_M: int
-
-    HNSW_EF_CONSTRUCTION: int
-
-    HNSW_MAX_ELEMENT: int
-
-    HNSW_RESIZE_COUNT: int
-
-    HNSW_EF_SEARCH: Optional[int] = None
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    next_hnsw_id: int = field(default=0)
-
-    metric: Metric = "cosine"
-
-    allow_updates: bool = True
-
-    hnsw_index: hnswlib.Index = field(init=False)
-
-    def __post_init__(self) -> None:
-        space = cast(Literal["l2", "ip", "cosine"], _METRIC_TO_SPACE[self.metric])
-        self.hnsw_index = hnswlib.Index(space=space, dim=self.vector_dim)
-        self.hnsw_index.init_index(ef_construction=self.HNSW_EF_CONSTRUCTION, M=self.HNSW_M, max_elements=self.HNSW_MAX_ELEMENT)
-
-        if self.HNSW_EF_SEARCH is not None:
-            self.hnsw_index.set_ef(self.HNSW_EF_SEARCH)
-
-@dataclass
-class VectKvSearchResult:
-    vectkv_id: VectKvId
-    distance: float
-    similarity_score: Optional[float]
-    metadata: Optional[JSON] = None
 
 
 DEFAULT_HNSW_M = 16
@@ -179,6 +125,8 @@ class VectKv:
 
         # Use the lock on the page
         async with page.lock:
+            if not page.hnsw_index:
+                raise VectKvException("HNSW Index not set")
 
             numpy_vector = np.array(vector)
 
@@ -207,7 +155,7 @@ class VectKv:
 
             existing_vector_hnsw_id: Optional[int] = page.vectkv_id_to_hnsw_id_map.get(vector_id, None)
             
-            page.vectors[vector_id] = VectorStore(metadata)
+            page.vectors[vector_id] = VectorStore(metadata=metadata)
 
             # Write to the index
             page.hnsw_index.add_items(numpy_vector.reshape(1, -1), [ existing_vector_hnsw_id if existing_vector_hnsw_id is not None else page.next_hnsw_id])
@@ -218,8 +166,6 @@ class VectKv:
 
             if existing_vector_hnsw_id is None:
                 page.next_hnsw_id += 1
-
-            
     
     async def __aenter__(self) -> Self:
         WAL_LOG_PATH = "wal.log.ndjson"
@@ -238,8 +184,33 @@ class VectKv:
 
                     if operation == "CREATE_PAGE":
                         create_wal_operation = CreatePageWALOperation.model_validate(wal_operation_json)
-
-
+                        await self.create_page(
+                            page_name=create_wal_operation.page_name,
+                            vector_dim=create_wal_operation.vector_dim,
+                            metric=create_wal_operation.metric,
+                            allow_updates=create_wal_operation.allow_updates,
+                            HNSW_M=create_wal_operation.HNSW_M,
+                            HNSW_EF_CONSTRUCTION=create_wal_operation.HNSW_EF_CONSTRUCTION,
+                            HNSW_MAX_ELEMENT=create_wal_operation.HNSW_MAX_ELEMENT,
+                            HNSW_RESIZE_COUNT=create_wal_operation.HNSW_RESIZE_COUNT,
+                            HNSW_EF_SEARCH=create_wal_operation.HNSW_EF_SEARCH,
+                            write_to_wal_log=False,
+                        )
+                    elif operation == "ADD_VECTOR":
+                        add_vector_wal_operation = AddVectorPageWALOperation.model_validate(wal_operation_json)
+                        await self.add_vector(
+                            page_name=add_vector_wal_operation.page_name,
+                            vector_id=add_vector_wal_operation.vector_id,
+                            vector=add_vector_wal_operation.vector,
+                            metadata=add_vector_wal_operation.metadata,
+                            write_to_wal_log=False,
+                        )
+                    elif operation == "DELETE_PAGE":
+                        delete_page_wal_operation = DeletePageWALOperation.model_validate(wal_operation_json)
+                        await self.delete_page(
+                            page_name=delete_page_wal_operation.page_name,
+                            write_to_wal_log=False,
+                        )
 
         # Check if the
         self.wal_file = await aiofiles.open("wal.log.ndjson", "a")
@@ -261,6 +232,9 @@ class VectKv:
 
         async with page.lock:
 
+            if not page.hnsw_index:
+                raise VectKvException("HNSW Index not set")
+
             if top_k < 1:
                 raise VectKvException("Top k must be 1 or greater")
 
@@ -270,6 +244,7 @@ class VectKv:
                 raise PageVectorDimException("Supplied query vector dim not the same as page vector dim")
 
             # get the minimum top_k to prevent runtime error, (top_k cannot be more than the current number of vectors)
+            
             minimum_top_k = min(top_k, page.hnsw_index.get_current_count()) 
 
             labels, distances = page.hnsw_index.knn_query(numpy_vector.reshape(1, -1), k=minimum_top_k)
@@ -312,43 +287,9 @@ class VectKv:
 
         async with page.lock:
 
+            if not page.hnsw_index:
+                raise VectKvException("HNSW Index not set")
+
             if ef_search <= 0:
                     raise VectKvException("HNSW_EF_SEARCH must not be less than or equal 0")
             page.hnsw_index.set_ef(ef_search)
-    
-
-async def main() -> None:
-    async with VectKv() as db:
-
-        await db.create_page(
-            page_name="animals",
-            vector_dim=3,
-            allow_updates=False
-        )
-
-
-        await db.set_ef_search("animals", 50)
-
-        # Add some vectors
-        await db.add_vector("animals", "dog", [1.0, 2.0, 3.0])
-
-        await db.add_vector("animals", "cat", [1.1, 2.2, 3.3])
-
-        await db.add_vector("animals", "lion", [1.9, 1.9, 3.2])
-
-        await db.add_vector("animals", "bird", [4.0, 6.0, 7.0])
-
-
-        results = await db.search_vectors(page_name="animals", query_vector=[1.2, 2.3, 3.4], top_k=10)
-
-        print(results)
-
-asyncio.run(main())
-
-
-    
-
-
-
-
-
