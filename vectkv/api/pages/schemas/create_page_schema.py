@@ -1,6 +1,6 @@
 from typing import Optional
-from ...types import Metric
 from pydantic import BaseModel, Field
+from ....types import Metric
 
 
 class CreatePageSchema(BaseModel):

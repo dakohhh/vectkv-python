@@ -1,8 +1,4 @@
-"""Write-Ahead Log (WAL) operation models for VectKV.
-
-This module defines the data structures for WAL operations that ensure
-durability and crash recovery for vector database operations.
-"""
+"""Write-Ahead Log (WAL) operation models for VectKV."""
 
 from pydantic import BaseModel
 from typing import Optional, List

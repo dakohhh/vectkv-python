@@ -22,6 +22,9 @@ DEFAULT_HNSW_MAX_ELEMENT = 10000
 
 DEFAULT_HNSW_RESIZE_COUNT = 10000
 
+SNAPSHOT_VECTOR_COUNT_THRESHOLD: int = 5
+
+
 
 def distance_to_cosine_similarity(d: float) -> float:
     return 1 - d
@@ -33,6 +36,8 @@ class VectKv:
     def __init__(self) -> None:
         self.global_store: Dict[VectKvId, Page] = {}
         self.global_lock = asyncio.Lock()
+
+        self.global_vector_count_for_snapshot = 0
     
     async def create_page(
         self,
@@ -94,6 +99,15 @@ class VectKv:
                 HNSW_EF_SEARCH=HNSW_EF_SEARCH
             )
 
+    
+    async def get_page(self, page_name: VectKvId) -> Page:
+        async with self.global_lock:
+            if page_name not in self.global_store:
+                raise VectKvException("Page name does not exist")
+
+            return self.global_store[page_name]
+        
+
     async def delete_page(self, page_name: VectKvId, write_to_wal_log: bool = True) -> None:
         async with self.global_lock:
             if page_name not in self.global_store:
@@ -141,6 +155,13 @@ class VectKv:
 
                 if existing_vector:
                     raise VectKvIdAlreadyExistException("Supplied vector id already exists")
+                
+            # increment the global vector count
+            self.global_vector_count_for_snapshot  = self.global_vector_count_for_snapshot + 1
+
+            if self.global_vector_count_for_snapshot % SNAPSHOT_VECTOR_COUNT_THRESHOLD == 0 :
+                # Take snapshot
+                pass
             
             wal_operation = AddVectorPageWALOperation(
                 op="ADD_VECTOR",
@@ -166,6 +187,7 @@ class VectKv:
 
             if existing_vector_hnsw_id is None:
                 page.next_hnsw_id += 1
+
     
     async def __aenter__(self) -> Self:
         WAL_LOG_PATH = "wal.log.ndjson"
@@ -175,7 +197,19 @@ class VectKv:
         if wal_log_path_exists:
             async with aiofiles.open(WAL_LOG_PATH, "r") as wal_file:
                 async for line in wal_file:
-                    wal_operation_json = json.loads(line)
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    try:
+                        wal_operation_json = json.loads(line)
+                    except json.JSONDecodeError:
+                        raise RuntimeError(
+                            "WAL corruption detected and cannot parse line. "
+                            "State recovered up to this point. "
+                            "Inspect or delete wal.log.ndjson to start fresh."
+                        )
 
                     operation: OperationType = wal_operation_json.get("op", None)
 
