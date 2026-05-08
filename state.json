@@ -1,0 +1,12 @@
+{
+    "states": [
+        {
+            "id": 1,
+            "path": "",
+            "hash": "",
+            "wal": {
+                "last_wal_no": 1
+            }
+        }
+    ]
+}

@@ -2,11 +2,12 @@ import asyncio
 import hnswlib
 from pydantic import BaseModel, Field, ConfigDict
 from .types import JSON, Metric, VectKvId
-from typing import Any, Dict, Literal, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 
 _METRIC_TO_SPACE: Dict[str, str] = {"cosine": "cosine", "euclidean": "l2", "ip": "ip"}
 
 class VectorStore(BaseModel):
+    vector: List[float]
     metadata: Optional[JSON] = None
 
 
@@ -42,3 +43,15 @@ class VectKvSearchResult(BaseModel):
     distance: float
     similarity_score: Optional[float] = None
     metadata: Optional[JSON] = None
+
+
+
+class Snapshot(BaseModel):
+    checksum_hash: str
+    directory_path: str 
+
+class SnapshotState(BaseModel):
+    snapshots: Dict[str, Snapshot] # key: snapshot_name , value: Snapshot
+    last_snapshot_name: Optional[str] = None
+    last_snapshot_hash: Optional[str] = None
+    last_snapshot_datetime: Optional[str] = None

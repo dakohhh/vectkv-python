@@ -13,6 +13,7 @@ pydantic = "^2.13.2"
 fastapi = "^0.136.1"
 aiofiles = "^25.1.0"
 uvicorn = "^0.46.0"
+orjson = "^3.11.8"
 
 
 [tool.poetry.group.dev.dependencies]

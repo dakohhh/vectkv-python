@@ -1,13 +1,16 @@
 import os
+import orjson
 import json
 import asyncio
+import hashlib
 import aiofiles
+from datetime import datetime
 import numpy as np
 from pathlib import Path
 from types import TracebackType
 from .types import JSON, Metric, VectKvId, OperationType
-from typing import Dict, List, Optional, Self
-from .schema import Page, VectorStore, VectKvSearchResult
+from typing import Any, Dict, List, Optional, Self
+from .schema import Page, VectorStore, VectKvSearchResult, SnapshotState, Snapshot
 from .wal import CreatePageWALOperation, DeletePageWALOperation, AddVectorPageWALOperation
 from .exceptions import VectKvException, PageVectorDimException, VectKvIdAlreadyExistException
 
@@ -22,7 +25,7 @@ DEFAULT_HNSW_MAX_ELEMENT = 10000
 
 DEFAULT_HNSW_RESIZE_COUNT = 10000
 
-SNAPSHOT_VECTOR_COUNT_THRESHOLD: int = 5
+SNAPSHOT_VECTOR_COUNT_THRESHOLD: int = 6
 
 
 
@@ -32,6 +35,11 @@ def distance_to_cosine_similarity(d: float) -> float:
 def distance_to_euclidean_similarity(d: float) -> float:
     return 1 / (1 + d)
 
+
+def create_checksums_from_snapshot_data(snapshot_dict_global_store_data: bytes) -> str:
+    checksum_hash = hashlib.sha256()
+    checksum_hash.update(snapshot_dict_global_store_data)
+    return checksum_hash.hexdigest()
 class VectKv:
     def __init__(self) -> None:
         self.global_store: Dict[VectKvId, Page] = {}
@@ -125,6 +133,7 @@ class VectKv:
 
 
     async def get_all_pages(self) -> List[str]:
+        print(self.global_vector_count_for_snapshot)
         async with self.global_lock:
             return list(self.global_store.keys())
         
@@ -155,13 +164,7 @@ class VectKv:
 
                 if existing_vector:
                     raise VectKvIdAlreadyExistException("Supplied vector id already exists")
-                
-            # increment the global vector count
-            self.global_vector_count_for_snapshot  = self.global_vector_count_for_snapshot + 1
-
-            if self.global_vector_count_for_snapshot % SNAPSHOT_VECTOR_COUNT_THRESHOLD == 0 :
-                # Take snapshot
-                pass
+    
             
             wal_operation = AddVectorPageWALOperation(
                 op="ADD_VECTOR",
@@ -176,7 +179,7 @@ class VectKv:
 
             existing_vector_hnsw_id: Optional[int] = page.vectkv_id_to_hnsw_id_map.get(vector_id, None)
             
-            page.vectors[vector_id] = VectorStore(metadata=metadata)
+            page.vectors[vector_id] = VectorStore(vector=vector, metadata=metadata)
 
             # Write to the index
             page.hnsw_index.add_items(numpy_vector.reshape(1, -1), [ existing_vector_hnsw_id if existing_vector_hnsw_id is not None else page.next_hnsw_id])
@@ -188,11 +191,63 @@ class VectKv:
             if existing_vector_hnsw_id is None:
                 page.next_hnsw_id += 1
 
-    
-    async def __aenter__(self) -> Self:
-        WAL_LOG_PATH = "wal.log.ndjson"
 
-        wal_log_path_exists = os.path.exists(os.path.join(BASE_DIR, WAL_LOG_PATH))
+            # increment the global vector count
+            self.global_vector_count_for_snapshot  = self.global_vector_count_for_snapshot + 1
+
+            if write_to_wal_log:
+                if self.global_vector_count_for_snapshot % SNAPSHOT_VECTOR_COUNT_THRESHOLD == 0:
+                    await self._take_snapshot()
+    
+    async def _take_snapshot(self) -> None:
+        SNAPSHOT_DIR = ".snapshots"
+        SNAPSHOT_PATH = os.path.join(BASE_DIR, SNAPSHOT_DIR)
+        SNAPSHOT_STATE_PATH = os.path.join(SNAPSHOT_PATH, "state.json")
+
+        if not os.path.exists(SNAPSHOT_PATH):
+            os.mkdir(SNAPSHOT_PATH)
+
+        if not os.path.exists(SNAPSHOT_STATE_PATH):
+            snapshot_state = SnapshotState(snapshots={})
+        else:
+            async with aiofiles.open(SNAPSHOT_STATE_PATH, "r") as f:
+                snapshot_state = SnapshotState.model_validate_json(await f.read())
+
+        snapshot_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f_snapshot")
+        os.mkdir(os.path.join(SNAPSHOT_PATH, snapshot_name))
+
+        snapshot_dict_global_store = {}
+
+        for page_vectkv_id, _page in self.global_store.items():
+            snapshot_dict_global_store[page_vectkv_id] = _page.model_dump()
+            if _page.hnsw_index:
+                _page.hnsw_index.save_index(os.path.join(SNAPSHOT_PATH, snapshot_name, f"{page_vectkv_id}.bin"))
+
+        snapshot_dict_global_store_data = orjson.dumps(
+            snapshot_dict_global_store,
+            option=orjson.OPT_NON_STR_KEYS | orjson.OPT_INDENT_2,
+        )
+
+        async with aiofiles.open(os.path.join(SNAPSHOT_PATH, snapshot_name, "data.json"), "wb") as f:
+            await f.write(snapshot_dict_global_store_data)
+
+        checksum = create_checksums_from_snapshot_data(snapshot_dict_global_store_data)
+
+        snapshot_state.snapshots[snapshot_name] = Snapshot(
+            checksum_hash=checksum,
+            directory_path=os.path.join(SNAPSHOT_PATH, snapshot_name),
+        )
+        snapshot_state.last_snapshot_name = snapshot_name
+        snapshot_state.last_snapshot_hash = checksum
+        snapshot_state.last_snapshot_datetime = datetime.now().isoformat()
+
+        async with aiofiles.open(SNAPSHOT_STATE_PATH, "wb") as f:
+            await f.write(snapshot_state.model_dump_json(indent=2).encode())
+
+    async def __aenter__(self) -> Self:
+        WAL_LOG_PATH = os.path.join(BASE_DIR, "wal.log.ndjson")
+
+        wal_log_path_exists = os.path.exists(WAL_LOG_PATH)
 
         if wal_log_path_exists:
             async with aiofiles.open(WAL_LOG_PATH, "r") as wal_file:
@@ -247,7 +302,7 @@ class VectKv:
                         )
 
         # Check if the
-        self.wal_file = await aiofiles.open("wal.log.ndjson", "a")
+        self.wal_file = await aiofiles.open(WAL_LOG_PATH, "a")
 
         return self
     
@@ -327,3 +382,6 @@ class VectKv:
             if ef_search <= 0:
                     raise VectKvException("HNSW_EF_SEARCH must not be less than or equal 0")
             page.hnsw_index.set_ef(ef_search)
+
+
+

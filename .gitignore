@@ -2,3 +2,6 @@ wal.log.ndjson
 .vscode
 .venv
 __pycache__
+.snapshot/
+.snapshots/
+.mypy_cache/

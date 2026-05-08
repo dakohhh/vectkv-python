@@ -1,15 +1,15 @@
 import uvicorn
 from .main import VectKv
 from fastapi import FastAPI
-from typing import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Dict, Any
 from .handler import configure_error_middleware
 from .api.pages.router import router as pages_router
 from .api.vectors.router import router as vectors_router
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[dict, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[Dict[Any, Any], None]:
     async with VectKv() as db:
         yield {"db": db}
 

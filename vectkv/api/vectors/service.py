@@ -1,7 +1,6 @@
 from ...main import VectKv
 from .schemas.add_vector_schema import AddVectorSchema
 
-
 class VectorsAPIService:
 
     async def add_vector(self, db: VectKv, add_vector_schema: AddVectorSchema) -> None:
